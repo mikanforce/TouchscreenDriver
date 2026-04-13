@@ -1,182 +1,149 @@
-# Touchscreen Driver for Corsair Xeneon Edge
+# TouchscreenDriver for Corsair Xeneon Edge
 
-> **Co-authored by [Yves-Marie Lainé](https://github.com/ymlaine) and [Claude](https://claude.ai) (Anthropic AI)**
->
-> This driver was developed through human-AI collaboration using Claude Code.
+macOSでCorsair Xeneon Edgeのタッチスクリーンを動かすドライバです。  
+タッチ入力をマウスクリックに変換し、拡張ディスプレイ上でのシングル・ダブルクリック操作を可能にします。
 
-A macOS driver that converts touch input from the Corsair Xeneon Edge (14.5" touch bar, 2560x720) into mouse clicks at the correct absolute screen position.
+> **開発**: [mikanforce](https://github.com/mikanforce) × [Claude](https://claude.ai) (Anthropic AI)
 
-## Features
+---
 
-- Converts touch events to mouse clicks at the touched position
-- Exclusive HID capture (no double clicks)
-- Multi-monitor support with automatic screen detection
-- Cursor returns to original position after click
-- Adapts to resolution changes (including HiDPI/scaled modes)
-- Dynamic reconfiguration when displays are rearranged
+## 特徴
 
-## How It Works
+- タッチした位置に正確にクリックを送信
+- **シングルタップ** → クリック
+- **素早く2回タップ（300ms以内）** → ダブルクリック
+- HID排他キャプチャ（ダブル入力防止）
+- マルチモニター対応・自動ディスプレイ検出
+- クリック後にカーソルを元の位置に自動復帰
+- 解像度変更・ディスプレイ再配置に自動対応
 
-```
-┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
-│  Touchscreen    │────▶│  Driver          │────▶│  macOS          │
-│  (USB HID)      │     │  (exclusive)     │     │  (CGEvent)      │
-└─────────────────┘     └──────────────────┘     └─────────────────┘
-   Raw X, Y coords        Convert & map          Click at absolute
-   Button events          to screen space        position
-```
+---
 
-## Requirements
+## 動作環境
 
-- macOS 10.15+ (Catalina or later)
-- Xcode Command Line Tools: `xcode-select --install`
-- Corsair Xeneon Edge connected via USB-C
+- macOS 10.15 (Catalina) 以降
+- Xcode Command Line Tools
+- Corsair Xeneon Edge（USB-C接続）
 
-## Installation
+---
 
-### Automatic (Recommended)
+## インストール
 
 ```bash
-git clone https://github.com/ymlaine/TouchscreenDriver.git
+git clone https://github.com/mikanforce/TouchscreenDriver.git
 cd TouchscreenDriver
 ./install.sh
 ```
 
-This will:
-- Compile the driver
-- Install it to `/usr/local/bin`
-- Configure it to start automatically at login
-- Start the driver immediately
+インストール後、自動的にドライバが起動し、ログイン時に自動起動するよう設定されます。
 
-### Uninstall
+### 権限の付与（初回のみ）
+
+初回起動時にmacOSが2つの権限を要求します：
+
+1. **アクセシビリティ**  
+   `システム設定` → `プライバシーとセキュリティ` → `アクセシビリティ` → TouchscreenDriverを追加
+
+2. **入力監視**  
+   `システム設定` → `プライバシーとセキュリティ` → `入力監視` → TouchscreenDriverを追加
+
+権限付与後、ドライバを再起動してください。
+
+---
+
+## アンインストール
 
 ```bash
 ./uninstall.sh
 ```
 
-### Manual
+---
+
+## 操作コマンド
 
 ```bash
-git clone https://github.com/ymlaine/TouchscreenDriver.git
-cd TouchscreenDriver
-chmod +x run_driver.sh run_analyzer.sh
-./run_driver.sh
-```
-
-### Grant Permissions
-
-On first run, macOS will ask for permissions:
-
-1. **Accessibility**: Required to inject mouse clicks
-   - System Settings → Privacy & Security → Accessibility
-   - Add Terminal (or the compiled binary)
-
-2. **Input Monitoring**: Required to capture HID events
-   - System Settings → Privacy & Security → Input Monitoring
-   - Add Terminal (or the compiled binary)
-
-### Control Commands
-
-```bash
-# Status
+# 状態確認
 pgrep -f TouchscreenDriver && echo "Running" || echo "Stopped"
 
-# Logs
+# ログ確認
 tail -f /tmp/touchscreendriver.log
 
-# Stop
+# 停止
 launchctl unload ~/Library/LaunchAgents/com.ymlaine.touchscreendriver.plist
 
-# Start
+# 起動
 launchctl load ~/Library/LaunchAgents/com.ymlaine.touchscreendriver.plist
 ```
 
-## Calibration
+---
 
-The driver is pre-calibrated for the Xeneon Edge touchscreen:
-- X range: 0 - 16383
-- Y range: 0 - 9599
-- Touch detection: Button 1 (HID Usage Page 0x09)
+## カスタマイズ
 
-### Re-calibrate (if needed)
+`TouchscreenDriver.swift` の冒頭部分で調整できます：
 
-If touch positions are incorrect, use the analyzer:
+```swift
+// ダブルクリック判定時間（デフォルト: 300ms）
+let doubleClickInterval: TimeInterval = 0.3
 
+// ダブルクリック判定距離（デフォルト: 20px以内）
+let doubleClickDistance: CGFloat = 20.0
+
+// debounce（誤クリック防止の待ち時間、デフォルト: 50ms）
+let debounceInterval: TimeInterval = 0.05
+```
+
+変更後は再ビルドが必要です：
+
+```bash
+./install.sh
+```
+
+---
+
+## トラブルシューティング
+
+### 「タッチスクリーンが見つかりません」
+- USB-Cで接続されているか確認
+- `システム情報` → `USB` でデバイスが認識されているか確認
+
+### 「アクセシビリティ権限が必要です」と繰り返し表示される
+- アクセシビリティの一覧からTouchscreenDriverを一度削除して再追加
+- 再コンパイル後は権限の再付与が必要です
+
+### iCUEと競合する
+- iCUEを終了してからドライバを起動してください
+- どうしても共存させたい場合は `captureMode = .shared` に変更（ダブルクリックが発生する場合あり）
+
+### クリック位置がズレる
 ```bash
 ./run_analyzer.sh
 ```
+で画面四隅をタッチしてX/Y最大値を確認し、`TouchscreenDriver.swift`の値を更新してください。
 
-Touch the screen corners and note the X/Y max values, then update `TouchscreenDriver.swift`:
+---
 
-```swift
-var touchscreenMaxX: CGFloat = 16383  // Your X max
-var touchscreenMaxY: CGFloat = 9599   // Your Y max
-```
-
-## Hardware Info
+## ハードウェア情報
 
 ```
-Touchscreen Controller:
+タッチスクリーンコントローラ:
   Vendor ID:  0x27c0
   Product ID: 0x0859
-  Manufacturer: wch.cn
+  製造元: wch.cn
 
-Display:
-  Native resolution: 2560x720 (32:9 ratio)
-  Recommended: 1920x540 scaled (better readability)
+ディスプレイ:
+  ネイティブ解像度: 2560x720 (32:9)
+  推奨スケーリング: 1920x540（文字が読みやすい）
 ```
 
-## Files
+---
 
-| File | Description |
-|------|-------------|
-| `TouchscreenDriver.swift` | Main driver with HID capture and CGEvent injection |
-| `HIDAnalyzer.swift` | Diagnostic tool to inspect raw HID reports |
-| `run_driver.sh` | Build and run the driver |
-| `run_analyzer.sh` | Build and run the analyzer |
+## ライセンス
 
-## Troubleshooting
+MIT License
 
-### "Touchscreen not found"
-- Ensure the Xeneon Edge is connected via USB-C
-- Check USB connection in System Information → USB
-- Verify Vendor/Product IDs match
+---
 
-### "Cannot open IOHIDManager"
-- Grant Input Monitoring permission to Terminal
-- Restart Terminal after granting permissions
-- Close other apps using the touchscreen (iCUE, etc.)
+## 謝辞
 
-### Clicks at wrong position
-1. Run `./run_analyzer.sh` and touch screen corners
-2. Update touchscreenMaxX/Y values in the code
-3. Rebuild with `./run_driver.sh`
-
-### Exclusive mode fails
-Another app may be using the touchscreen. Either:
-- Close conflicting apps (iCUE, etc.)
-- Switch to shared mode (edit `TouchscreenDriver.swift`):
-  ```swift
-  var captureMode: CaptureMode = .shared
-  ```
-  Note: Shared mode may cause double clicks.
-
-## Resolution Tips
-
-The native 2560x720 resolution can make text hard to read. For better readability:
-
-1. Go to **System Settings → Displays**
-2. Select the Xeneon Edge
-3. Choose **1920x540** (maintains 32:9 ratio, larger text)
-
-The driver automatically adapts to any resolution.
-
-## License
-
-MIT License - Feel free to use and modify.
-
-## Credits
-
-Created by **Yves-Marie Lainé** in collaboration with **Claude** (Anthropic).
-
-Built with Swift using IOKit HID and CoreGraphics frameworks.
+元のドライバ実装: [ymlaine/TouchscreenDriver](https://github.com/ymlaine/TouchscreenDriver)  
+ダブルクリック対応・日本語化: [mikanforce](https://github.com/mikanforce)
