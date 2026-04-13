@@ -6,293 +6,163 @@ import IOKit.hid
 import CoreGraphics
 import AppKit
 
-// ============================================
-// Configuration pour Corsair Xeneon Edge
-// À AJUSTER après analyse des rapports HID
-// ============================================
 let TOUCHSCREEN_VENDOR_ID: Int = 0x27c0
 let TOUCHSCREEN_PRODUCT_ID: Int = 0x0859
 
-// Plages de coordonnées du touchscreen (calibrées via HIDAnalyzer)
 var touchscreenMaxX: CGFloat = 16383
 var touchscreenMaxY: CGFloat = 9599
 var touchscreenMinX: CGFloat = 0
 var touchscreenMinY: CGFloat = 0
 
-// ============================================
-// Configuration écran cible
-// ============================================
 var targetScreen: NSScreen?
 var screenOffsetX: CGFloat = 0
 var screenOffsetY: CGFloat = 0
 var screenWidth: CGFloat = 2560
 var screenHeight: CGFloat = 720
 
-// ============================================
-// État du toucher
-// ============================================
 var currentX: CGFloat = 0
 var currentY: CGFloat = 0
 var isTouching: Bool = false
 var lastClickTime: Date = Date.distantPast
-let debounceInterval: TimeInterval = 0.05 // 50ms debounce
+let debounceInterval: TimeInterval = 0.05
 
-// ============================================
-// Mode de fonctionnement
-// ============================================
-enum ClickMode {
-    case moveCursorAndClick  // Téléporte le curseur puis clique
-    case clickInPlace        // Clique sans bouger le curseur (peut ne pas marcher avec toutes les apps)
-}
+var lastTouchTime: Date = Date.distantPast
+var lastTouchPoint: CGPoint = .zero
+let doubleClickInterval: TimeInterval = 0.3
+let doubleClickDistance: CGFloat = 20.0
+
+enum ClickMode { case moveCursorAndClick, clickInPlace }
 var clickMode: ClickMode = .moveCursorAndClick
 
-// ============================================
-// Mode de capture HID
-// ============================================
-enum CaptureMode {
-    case shared      // Écoute les événements sans les bloquer (peut causer des doubles clics)
-    case exclusive   // Capture exclusive - bloque les événements système (recommandé)
-}
+enum CaptureMode { case shared, exclusive }
 var captureMode: CaptureMode = .exclusive
 
-// ============================================
-// Fonctions utilitaires
-// ============================================
-
 func convertToScreenCoordinates(rawX: Int, rawY: Int) -> CGPoint {
-    // Normaliser les coordonnées brutes en 0.0 - 1.0
     let normalizedX = (CGFloat(rawX) - touchscreenMinX) / (touchscreenMaxX - touchscreenMinX)
     let normalizedY = (CGFloat(rawY) - touchscreenMinY) / (touchscreenMaxY - touchscreenMinY)
-    
-    // Convertir en coordonnées écran
-    let screenX = screenOffsetX + (normalizedX * screenWidth)
-    let screenY = screenOffsetY + (normalizedY * screenHeight)
-    
-    return CGPoint(x: screenX, y: screenY)
+    return CGPoint(x: screenOffsetX + (normalizedX * screenWidth),
+                   y: screenOffsetY + (normalizedY * screenHeight))
 }
 
 func injectClick(at point: CGPoint) {
-    // Vérifier le debounce
     let now = Date()
     guard now.timeIntervalSince(lastClickTime) > debounceInterval else { return }
     lastClickTime = now
 
-    // Sauvegarder la position actuelle du curseur
+    let timeSinceLastTouch = now.timeIntervalSince(lastTouchTime)
+    let distanceFromLastTouch = hypot(point.x - lastTouchPoint.x, point.y - lastTouchPoint.y)
+    let isDoubleClick = timeSinceLastTouch < doubleClickInterval && distanceFromLastTouch < doubleClickDistance
+
+    lastTouchTime = now
+    lastTouchPoint = point
+
     let originalPosition = NSEvent.mouseLocation
-    // Convertir de NSScreen (origine bas-gauche) vers CG (origine haut-gauche)
     let mainScreenHeight = NSScreen.screens[0].frame.height
     let originalCGPosition = CGPoint(x: originalPosition.x, y: mainScreenHeight - originalPosition.y)
 
-    switch clickMode {
-    case .moveCursorAndClick:
-        // Cacher le curseur pour éviter le curseur fantôme
-        CGDisplayHideCursor(CGMainDisplayID())
+    CGDisplayHideCursor(CGMainDisplayID())
+    CGWarpMouseCursorPosition(point)
+    usleep(10000)
 
-        // Téléporter le curseur
-        CGWarpMouseCursorPosition(point)
+    let clickCount: Int64 = isDoubleClick ? 2 : 1
 
-        // Petit délai pour que le système enregistre la position
-        usleep(10000) // 10ms
+    guard let mouseDown = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown,
+                                   mouseCursorPosition: point, mouseButton: .left),
+          let mouseUp = CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp,
+                                 mouseCursorPosition: point, mouseButton: .left) else { return }
 
-    case .clickInPlace:
-        break // Ne pas bouger le curseur
-    }
+    mouseDown.setIntegerValueField(.mouseEventClickState, value: clickCount)
+    mouseUp.setIntegerValueField(.mouseEventClickState, value: clickCount)
 
-    // Créer et poster les événements souris
-    guard let mouseDown = CGEvent(mouseEventSource: nil,
-                                   mouseType: .leftMouseDown,
-                                   mouseCursorPosition: point,
-                                   mouseButton: .left) else {
-        print("❌ Erreur création événement mouseDown")
-        return
-    }
-
-    guard let mouseUp = CGEvent(mouseEventSource: nil,
-                                 mouseType: .leftMouseUp,
-                                 mouseCursorPosition: point,
-                                 mouseButton: .left) else {
-        print("❌ Erreur création événement mouseUp")
-        return
-    }
-
-    // Poster les événements
     mouseDown.post(tap: .cghidEventTap)
-    usleep(20000) // 20ms entre down et up
+    usleep(20000)
     mouseUp.post(tap: .cghidEventTap)
 
-    // Restaurer la position originale du curseur
-    if clickMode == .moveCursorAndClick {
-        usleep(10000) // 10ms avant de restaurer
-        CGWarpMouseCursorPosition(originalCGPosition)
+    usleep(10000)
+    CGWarpMouseCursorPosition(originalCGPosition)
+    CGDisplayShowCursor(CGMainDisplayID())
 
-        // Réafficher le curseur
-        CGDisplayShowCursor(CGMainDisplayID())
-    }
-
-    print("🖱️  Clic injecté à (\(Int(point.x)), \(Int(point.y)))")
+    print(isDoubleClick ? "🖱️🖱️ ダブルクリック at (\(Int(point.x)), \(Int(point.y)))" : "🖱️  シングルクリック at (\(Int(point.x)), \(Int(point.y)))")
 }
 
 func injectDrag(to point: CGPoint) {
-    guard let dragEvent = CGEvent(mouseEventSource: nil,
-                                   mouseType: .leftMouseDragged,
-                                   mouseCursorPosition: point,
-                                   mouseButton: .left) else {
-        return
-    }
-    
-    if clickMode == .moveCursorAndClick {
-        CGWarpMouseCursorPosition(point)
-    }
-    
+    guard let dragEvent = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDragged,
+                                   mouseCursorPosition: point, mouseButton: .left) else { return }
+    CGWarpMouseCursorPosition(point)
     dragEvent.post(tap: .cghidEventTap)
 }
 
-// ============================================
-// Callback HID
-// ============================================
-
-func hidInputCallback(context: UnsafeMutableRawPointer?,
-                      result: IOReturn,
-                      sender: UnsafeMutableRawPointer?,
-                      value: IOHIDValue) {
-
-    // Toujours mettre à jour la géométrie de l'écran (NSScreen peut changer à tout moment)
+func hidInputCallback(context: UnsafeMutableRawPointer?, result: IOReturn,
+                      sender: UnsafeMutableRawPointer?, value: IOHIDValue) {
     updateScreenFromCurrentList()
-
     let element = IOHIDValueGetElement(value)
     let usagePage = IOHIDElementGetUsagePage(element)
     let usage = IOHIDElementGetUsage(element)
     let intValue = IOHIDValueGetIntegerValue(value)
-    
-    // Mettre à jour les coordonnées
-    if usagePage == 0x01 { // Generic Desktop
+
+    if usagePage == 0x01 {
         switch usage {
-        case 0x30: // X
-            currentX = CGFloat(intValue)
-        case 0x31: // Y
-            currentY = CGFloat(intValue)
-        default:
-            break
+        case 0x30: currentX = CGFloat(intValue)
+        case 0x31: currentY = CGFloat(intValue)
+        default: break
         }
     }
-    
-    // Détecter le toucher (Tip Switch OU Button 1)
-    // Le Xeneon Edge utilise Button 1 (usagePage 0x09, usage 0x01) au lieu de Tip Switch
-    let isTouchEvent = (usagePage == 0x0D && usage == 0x42) || (usagePage == 0x09 && usage == 0x01)
 
+    let isTouchEvent = (usagePage == 0x0D && usage == 0x42) || (usagePage == 0x09 && usage == 0x01)
     if isTouchEvent {
         let wasTouching = isTouching
         isTouching = intValue != 0
-
         if isTouching && !wasTouching {
-            // Nouveau toucher → clic
-            let screenPoint = convertToScreenCoordinates(rawX: Int(currentX), rawY: Int(currentY))
-            injectClick(at: screenPoint)
+            injectClick(at: convertToScreenCoordinates(rawX: Int(currentX), rawY: Int(currentY)))
         } else if isTouching && wasTouching {
-            // Glissement → drag
-            let screenPoint = convertToScreenCoordinates(rawX: Int(currentX), rawY: Int(currentY))
-            injectDrag(to: screenPoint)
+            injectDrag(to: convertToScreenCoordinates(rawX: Int(currentX), rawY: Int(currentY)))
         }
-        // Si relâché, on ne fait rien (le mouseUp a déjà été envoyé)
     }
 }
 
-// ============================================
-// Configuration de l'écran
-// ============================================
-
 func setupScreen() {
-    // Trouver l'écran Corsair Xeneon Edge
-    // Par défaut on prend l'écran principal, mais tu peux ajuster
-    
     let screens = NSScreen.screens
-    print("📺 Écrans détectés:")
-    
-    for (index, screen) in screens.enumerated() {
-        let frame = screen.frame
-        let name = screen.localizedName
-        print("   [\(index)] \(name): \(Int(frame.width))x\(Int(frame.height)) @ (\(Int(frame.origin.x)), \(Int(frame.origin.y)))")
+    print("📺 検出されたディスプレイ:")
+    for (i, s) in screens.enumerated() {
+        print("   [\(i)] \(s.localizedName): \(Int(s.frame.width))x\(Int(s.frame.height))")
     }
-    
-    // Chercher l'écran Corsair (ou prendre le principal)
-    // Tu peux ajuster cette logique selon ta configuration
-    if let xeneonScreen = screens.first(where: { $0.localizedName.contains("XENEON") || $0.localizedName.contains("Corsair") }) {
-        targetScreen = xeneonScreen
-        print("✅ Écran Xeneon Edge trouvé!")
+    if let s = screens.first(where: { $0.localizedName.contains("XENEON") || $0.localizedName.contains("Corsair") }) {
+        targetScreen = s; print("✅ Xeneon Edge 検出!")
     } else if screens.count > 1 {
-        // Prendre le deuxième écran (souvent l'externe)
-        targetScreen = screens[1]
-        print("⚠️  Xeneon non identifié par nom, utilisation de l'écran secondaire")
+        targetScreen = screens[1]; print("⚠️  セカンダリディスプレイを使用")
     } else {
-        targetScreen = NSScreen.main
-        print("⚠️  Un seul écran détecté, utilisation de l'écran principal")
+        targetScreen = NSScreen.main; print("⚠️  メインディスプレイを使用")
     }
-    
     updateScreenGeometry()
 }
 
 var xeneonDisplayID: CGDirectDisplayID = 0
 
 func findXeneonDisplayID() {
-    // Trouver l'ID du display Xeneon au démarrage
     var displayCount: UInt32 = 0
     CGGetActiveDisplayList(0, nil, &displayCount)
-
     var displays = [CGDirectDisplayID](repeating: 0, count: Int(displayCount))
     CGGetActiveDisplayList(displayCount, &displays, &displayCount)
-
-    // Prendre le display qui n'est pas le principal
-    for display in displays {
-        if display != CGMainDisplayID() {
-            xeneonDisplayID = display
-            break
-        }
-    }
+    for d in displays { if d != CGMainDisplayID() { xeneonDisplayID = d; break } }
 }
 
 func updateScreenFromCurrentList() {
     guard xeneonDisplayID != 0 else { return }
-
-    // Utiliser CGDisplayBounds qui se met à jour en temps réel (contrairement à NSScreen.screens)
-    let bounds = CGDisplayBounds(xeneonDisplayID)
-
-    // CGDisplayBounds utilise le système de coordonnées avec origine en haut à gauche
-    screenOffsetX = bounds.origin.x
-    screenOffsetY = bounds.origin.y
-    screenWidth = bounds.width
-    screenHeight = bounds.height
+    let b = CGDisplayBounds(xeneonDisplayID)
+    screenOffsetX = b.origin.x; screenOffsetY = b.origin.y
+    screenWidth = b.width; screenHeight = b.height
 }
 
 func updateScreenGeometry() {
-    if let screen = targetScreen {
-        let frame = screen.frame
-        let scaleFactor = screen.backingScaleFactor
-
-        // NSScreen utilise l'origine en bas à gauche, mais CGEvent utilise l'origine en haut à gauche
-        // On doit convertir les coordonnées Y
-        let mainScreenHeight = NSScreen.screens[0].frame.height
-
-        screenOffsetX = frame.origin.x
-        // Convertir Y: cgY = mainHeight - nsY - screenHeight
-        screenOffsetY = mainScreenHeight - frame.origin.y - frame.height
-
-        // CGEvent utilise les coordonnées en points logiques
-        // frame.size donne déjà la taille logique, c'est ce qu'on veut
-        screenWidth = frame.width
-        screenHeight = frame.height
-
-        print("📐 Écran cible: \(Int(screenWidth))x\(Int(screenHeight)) points")
-        print("   Backing scale factor: \(scaleFactor)x (HiDPI: \(scaleFactor > 1 ? "oui" : "non"))")
-        print("   NSScreen origin: (\(Int(frame.origin.x)), \(Int(frame.origin.y)))")
-        print("   CGEvent origin:  (\(Int(screenOffsetX)), \(Int(screenOffsetY)))")
-    }
+    guard let screen = targetScreen else { return }
+    let f = screen.frame
+    let mainH = NSScreen.screens[0].frame.height
+    screenOffsetX = f.origin.x
+    screenOffsetY = mainH - f.origin.y - f.height
+    screenWidth = f.width; screenHeight = f.height
+    print("📐 ターゲット: \(Int(screenWidth))x\(Int(screenHeight)) @ (\(Int(screenOffsetX)), \(Int(screenOffsetY)))")
 }
 
-// ============================================
-// Observer pour les changements d'écran
-// ============================================
-
-// Sauvegarde de la dernière géométrie connue pour détecter les changements
 var lastKnownScreenOriginX: CGFloat = 0
 var lastKnownScreenOriginY: CGFloat = 0
 var lastKnownScreenWidth: CGFloat = 0
@@ -300,190 +170,84 @@ var lastKnownScreenHeight: CGFloat = 0
 
 class ScreenChangeObserver {
     var timer: DispatchSourceTimer?
-
     init() {
-        // Observer les changements de configuration d'écran (connexion/déconnexion)
-        NotificationCenter.default.addObserver(
-            forName: NSApplication.didChangeScreenParametersNotification,
-            object: nil,
-            queue: .main
-        ) { _ in
-            print("\n🔄 Configuration d'écran modifiée! Mise à jour...")
-            setupScreen()
-            saveCurrentGeometry()
-        }
-
-        // Timer GCD pour vérifier les changements de position
+        NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil, queue: .main) { _ in setupScreen(); saveCurrentGeometry() }
         timer = DispatchSource.makeTimerSource(queue: DispatchQueue.main)
         timer?.schedule(deadline: .now() + 2.0, repeating: 2.0)
-        timer?.setEventHandler {
-            checkForGeometryChanges()
-        }
+        timer?.setEventHandler { checkForGeometryChanges() }
         timer?.resume()
     }
 }
 
 func saveCurrentGeometry() {
-    if let screen = targetScreen {
-        lastKnownScreenOriginX = screen.frame.origin.x
-        lastKnownScreenOriginY = screen.frame.origin.y
-        lastKnownScreenWidth = screen.frame.width
-        lastKnownScreenHeight = screen.frame.height
+    if let s = targetScreen {
+        lastKnownScreenOriginX = s.frame.origin.x; lastKnownScreenOriginY = s.frame.origin.y
+        lastKnownScreenWidth = s.frame.width; lastKnownScreenHeight = s.frame.height
     }
 }
 
 func checkForGeometryChanges() {
-    // Chercher l'écran Xeneon dans la liste actuelle (qui est mise à jour par le système)
-    guard let currentXeneon = NSScreen.screens.first(where: {
-        $0.localizedName.contains("XENEON") || $0.localizedName.contains("Corsair")
-    }) ?? (NSScreen.screens.count > 1 ? NSScreen.screens[1] : nil) else {
-        return
-    }
-
-    let frame = currentXeneon.frame
-    if frame.origin.x != lastKnownScreenOriginX ||
-       frame.origin.y != lastKnownScreenOriginY ||
-       frame.width != lastKnownScreenWidth ||
-       frame.height != lastKnownScreenHeight {
-
-        print("\n🔄 Changement de disposition détecté!")
-        print("   Avant: (\(Int(lastKnownScreenOriginX)), \(Int(lastKnownScreenOriginY))) \(Int(lastKnownScreenWidth))x\(Int(lastKnownScreenHeight))")
-        print("   Après: (\(Int(frame.origin.x)), \(Int(frame.origin.y))) \(Int(frame.width))x\(Int(frame.height))")
-
-        // Mettre à jour la référence à l'écran
-        targetScreen = currentXeneon
-        updateScreenGeometry()
-        saveCurrentGeometry()
+    guard let x = NSScreen.screens.first(where: { $0.localizedName.contains("XENEON") || $0.localizedName.contains("Corsair") })
+          ?? (NSScreen.screens.count > 1 ? NSScreen.screens[1] : nil) else { return }
+    let f = x.frame
+    if f.origin.x != lastKnownScreenOriginX || f.origin.y != lastKnownScreenOriginY ||
+       f.width != lastKnownScreenWidth || f.height != lastKnownScreenHeight {
+        targetScreen = x; updateScreenGeometry(); saveCurrentGeometry()
     }
 }
 
 var screenObserver: ScreenChangeObserver?
-
-// ============================================
-// Vérification des permissions
-// ============================================
 
 func checkAccessibilityPermission() -> Bool {
     let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
     return AXIsProcessTrustedWithOptions(options)
 }
 
-// ============================================
-// Programme principal
-// ============================================
-
 func main() {
     print("""
     ╔════════════════════════════════════════════════════════════╗
-    ║   Touchscreen Driver - Corsair Xeneon Edge      v1.3.0     ║
-    ║   Convertit les touches en clics absolus                   ║
+    ║   Touchscreen Driver - Corsair Xeneon Edge      v1.4.0     ║
+    ║   シングル＆ダブルクリック対応                              ║
     ╚════════════════════════════════════════════════════════════╝
-
     """)
-    
-    // Vérifier les permissions Accessibilité
-    print("🔐 Vérification des permissions Accessibilité...")
-    if !checkAccessibilityPermission() {
-        print("""
-        
-        ⚠️  PERMISSION REQUISE
-        
-        Pour injecter des clics, cette app doit être ajoutée à:
-        Préférences Système → Confidentialité → Accessibilité
-        
-        Une fenêtre de demande devrait s'être ouverte.
-        Après avoir accordé la permission, relance le programme.
-        
-        """)
-        exit(1)
-    }
-    print("✅ Permission Accessibilité accordée")
-    
-    // Configurer l'écran cible
-    setupScreen()
-    findXeneonDisplayID()
-    saveCurrentGeometry()
 
-    // Initialiser l'observer pour les changements d'écran
+    if !checkAccessibilityPermission() { print("⚠️  アクセシビリティ権限が必要です"); exit(1) }
+    print("✅ アクセシビリティ権限OK")
+
+    setupScreen(); findXeneonDisplayID(); saveCurrentGeometry()
     screenObserver = ScreenChangeObserver()
-    
+
     print("""
-    
-    📊 Configuration actuelle:
-       Touchscreen: X=[0, \(Int(touchscreenMaxX))], Y=[0, \(Int(touchscreenMaxY))]
-       Mode clic: \(clickMode == .moveCursorAndClick ? "Déplacer curseur + clic" : "Clic sans déplacer")
-       Mode capture: \(captureMode == .exclusive ? "EXCLUSIF (bloque événements système)" : "PARTAGÉ (peut causer des doubles clics)")
-    
-    ⚠️  Si les clics ne sont pas à la bonne position, ajuste les valeurs
-       touchscreenMaxX/Y dans le code source après avoir utilisé HIDAnalyzer.
-    
+    📊 設定:
+       ダブルクリック: \(Int(doubleClickInterval * 1000))ms以内 / \(Int(doubleClickDistance))px以内
     """)
-    
-    // Créer le HID Manager
+
     let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
-    
-    // Filtrer pour notre écran tactile
-    let deviceMatch: [String: Any] = [
-        kIOHIDVendorIDKey as String: TOUCHSCREEN_VENDOR_ID,
-        kIOHIDProductIDKey as String: TOUCHSCREEN_PRODUCT_ID
-    ]
-    
+    let deviceMatch: [String: Any] = [kIOHIDVendorIDKey as String: TOUCHSCREEN_VENDOR_ID,
+                                       kIOHIDProductIDKey as String: TOUCHSCREEN_PRODUCT_ID]
     IOHIDManagerSetDeviceMatching(manager, deviceMatch as CFDictionary)
-    
-    // Ouvrir le manager avec le mode approprié
-    // kIOHIDOptionsTypeSeizeDevice = 0x01 - prend le contrôle exclusif du périphérique
-    let openOptions: IOOptionBits
-    if captureMode == .exclusive {
-        openOptions = IOOptionBits(kIOHIDOptionsTypeSeizeDevice)
-        print("🔒 Ouverture en mode EXCLUSIF (seize device)...")
-    } else {
-        openOptions = IOOptionBits(kIOHIDOptionsTypeNone)
-        print("🔓 Ouverture en mode PARTAGÉ...")
-    }
-    
+
+    let openOptions = IOOptionBits(kIOHIDOptionsTypeSeizeDevice)
     let openResult = IOHIDManagerOpen(manager, openOptions)
-    if openResult != kIOReturnSuccess {
-        print("❌ Erreur: Impossible d'ouvrir IOHIDManager (code: \(openResult))")
-        if captureMode == .exclusive {
-            print("""
-            
-            💡 Le mode exclusif peut échouer si:
-               - Un autre programme utilise déjà le périphérique
-               - Les permissions sont insuffisantes
-               
-            Tu peux essayer le mode PARTAGÉ en changeant:
-               var captureMode: CaptureMode = .shared
-               
-            """)
-        }
-        exit(1)
-    }
-    
-    // Vérifier le périphérique
+    guard openResult == kIOReturnSuccess else { print("❌ IOHIDManager起動失敗 (code: \(openResult))"); exit(1) }
+
     guard let deviceSet = IOHIDManagerCopyDevices(manager) as? Set<IOHIDDevice>, !deviceSet.isEmpty else {
-        print("❌ Erreur: Écran tactile non trouvé!")
-        exit(1)
+        print("❌ タッチスクリーンが見つかりません"); exit(1)
     }
-    
-    print("✅ Écran tactile connecté!")
-    
-    // Enregistrer le callback
+    print("✅ タッチスクリーン接続確認!")
+
     IOHIDManagerRegisterInputValueCallback(manager, hidInputCallback, nil)
     IOHIDManagerScheduleWithRunLoop(manager, CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue)
-    
+
     print("""
-    
-    🎯 Driver actif! Touche l'écran pour cliquer.
-       (Ctrl+C pour quitter)
-    
+    🎯 起動完了！
+       シングルタップ → クリック
+       素早く2回タップ → ダブルクリック
     """)
-    
-    // Lancer le RunLoop
+
     CFRunLoopRun()
 }
 
-// Désactiver le buffering pour voir la sortie en temps réel
 setbuf(stdout, nil)
-
-// Point d'entrée
 main()
